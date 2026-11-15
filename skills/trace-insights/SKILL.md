@@ -1,0 +1,109 @@
+---
+name: trace-insights
+description: Report your coding progress to the Trace engineering dashboard by sending small structured events. Use this skill at the start of any coding task, when you form a plan, when tests pass or fail, when you get blocked, and when the task is done, and as a periodic heartbeat during long tasks, even if the user never mentions Trace. Nobody writes manual status updates; Trace derives work status from the events you send.
+---
+
+# Trace Insights
+
+Trace is an engineering-intelligence dashboard. It stays accurate because agents report progress as events, so nobody has to write status updates. Your job: send one small HTTP event whenever something progress-relevant happens, and a heartbeat during long tasks so work never goes dark.
+
+Reporting must never get in the way of the real work. Every send is fire-and-forget.
+
+## 1. One-time setup
+
+Check whether Trace is configured. Print nothing secret.
+
+```bash
+[ -f "$HOME/.trace/disabled" ] && echo DISABLED
+[ -n "$TRACE_API_KEY" ] && echo ENV_OK
+[ -s "$HOME/.trace/key" ] && echo FILE_OK
+```
+
+PowerShell:
+
+```powershell
+if (Test-Path "$HOME\.trace\disabled") { "DISABLED" }
+if ($env:TRACE_API_KEY) { "ENV_OK" }
+if (Test-Path "$HOME\.trace\key") { "FILE_OK" }
+```
+
+- `DISABLED`: the user declined. Never send events and never ask again. Stop here.
+- `ENV_OK` or `FILE_OK`: already set up. Go to section 2.
+- Nothing printed: ask the user once (below).
+
+Ask once, in plain terms, and never block the actual task while waiting:
+
+> Trace can track this task's progress on your team's dashboard. It needs an API key (starts with `trc_`) from Trace, under Integrations. Please save it yourself by running the command below, then tell me when it's done. Don't paste the key into this chat.
+>
+> macOS/Linux: `mkdir -p ~/.trace && read -rs k && printf %s "$k" > ~/.trace/key && chmod 600 ~/.trace/key`
+> Windows: `New-Item -ItemType Directory -Force "$HOME\.trace" | Out-Null; $s = Read-Host "Trace API key" -AsSecureString; [Runtime.InteropServices.Marshal]::PtrToStringAuto([Runtime.InteropServices.Marshal]::SecureStringToBSTR($s)) | Set-Content "$HOME\.trace\key" -NoNewline -Encoding ascii`
+>
+> Want to skip? I won't ask again.
+
+If they decline: `mkdir -p "$HOME/.trace" && touch "$HOME/.trace/disabled"`, then say nothing more about it.
+
+If they paste a key into the chat anyway, do not save or repeat it. Tell them to revoke that key in Trace and create a new one, then use the command above.
+
+If their Trace is not on `http://localhost:3000`, ask for the URL once and save it to `~/.trace/url`.
+
+## 2. Sending an event
+
+Use the helper that ships beside this file. It reads the key (env var first, then `~/.trace/key`), fills in `repo` and `engineer` from git, times out after 5 seconds, and always exits 0.
+
+```bash
+bash "<SKILL_DIR>/send-event.sh" --type agent.heartbeat --task TRC-21 --summary "Refactoring status derivation"
+```
+
+```powershell
+powershell -File "<SKILL_DIR>\send-event.ps1" -Type agent.heartbeat -Task TRC-21 -Summary "Refactoring status derivation"
+```
+
+Flags: `type` (required), `task`, `summary`, `reason`, `confidence`, `engineer`, `repo`, `external-id`.
+
+If the helper is missing, use curl (never paste the key into the command):
+
+```bash
+curl -sS --max-time 5 -X POST "${TRACE_URL:-$(cat "$HOME/.trace/url" 2>/dev/null || echo http://localhost:3000)}/api/events" \
+  -H "Authorization: Bearer ${TRACE_API_KEY:-$(cat "$HOME/.trace/key" 2>/dev/null)}" \
+  -H "Content-Type: application/json" \
+  -d '{"type":"agent.blocked","task":"TRC-21","repo":"org/name","reason":"Schema mismatch; need the real column names"}' >/dev/null 2>&1 || true
+```
+
+## 3. Fields
+
+| Field | Required | Notes |
+|---|---|---|
+| `type` | yes | Lowercase, dot-namespaced, for example `agent.blocked` |
+| `task` | no | Work item id such as `TRC-21`. Infer it from the branch name, the ticket the user mentioned, or commit messages. Always include it when you can |
+| `summary` | no | One line, 280 characters or fewer, describing the work |
+| `reason` | no | For blockers and failures: what went wrong and what would unblock it |
+| `repo` | no | `org/name`. The helper fills it in |
+| `engineer` | no | The helper fills in the git user name |
+| `confidence` | no | 0 to 1 |
+| `external-id` | no | Stable id so a retry is not stored twice |
+
+## 4. When to send what
+
+| Moment | Type | Effect on status |
+|---|---|---|
+| Task starts | `agent.session_started` | in progress |
+| Plan is formed | `agent.planning` | none |
+| Writing code begins | `agent.implementation_started` | in progress |
+| Still working, nothing else fits | `agent.heartbeat` | in progress |
+| Tests pass | `agent.tests_passed` | none |
+| Tests fail | `agent.tests_failed` | none |
+| Stuck, or you need a human decision | `agent.blocked` | blocked |
+| Task finished and verified | `agent.completed` | none |
+
+## 5. Cadence
+
+A session is however long the task takes, not one chat window. Send an event at each moment above. If about 15 to 20 tool calls pass with no event and the task is still open, send `agent.heartbeat` with a one-line summary. Send one at a natural checkpoint too (tests run, a todo done). Never send one event per file edit. When the task is finished, send `agent.completed`. If the same conversation moves on to a new task, start again with `agent.session_started`.
+
+## 6. Hard rules
+
+- Fire-and-forget. If a send fails, drop it silently. Never retry in a loop, never tell the user, never let reporting slow down or interrupt the work.
+- No secrets. Never put keys, tokens, `.env` contents or sensitive file contents into `summary`, `reason` or any field. Never print, echo or `cat` the Trace key itself.
+- Summaries describe the work in one line. Never include the code or data you are working on.
+- `agent.blocked` is the most valuable event. Always give a specific `reason`: what blocks you and what would unblock it.
+- A `401` response means the key is invalid. Tell the user once, then stop sending for the rest of the task. Ignore every other error.
+- Privacy: Trace is designed to assist engineers, not to monitor them. Report task progress only, never keystrokes, file contents or personal activity.
